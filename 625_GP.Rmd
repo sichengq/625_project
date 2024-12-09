@@ -1,0 +1,357 @@
+
+
+```{r}
+library(haven)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(reshape)
+library(Matrix)  
+library(lme4)
+library(lmerTest)
+library(stringr)
+library(lubridate)
+library(gridExtra)
+library(broom)
+
+library(car)
+library(mice)
+library(naniar)
+library(readxl)
+library(MASS)
+library(VGAM)
+library(naniar)
+```
+
+
+```{r}
+data <- read_excel("Rawdate.xlsx")
+
+```
+
+
+```{r} 
+#Renaming Columns:
+
+colnames(data) <- c("ID", "Surveys", "AGE", "SEX", "Residential_areas", "Underlying_disease", "MARRIED",
+                    "CHILD", "Household_income", "Employment_status", "Economically_impacted", "PHQ1st", "PHQ2nd", "PHQ3rd",
+                    "StateAnger1", "AngerControl1", "StateAnger2", "AngerControl2", "StateAnger3", "AngerControl3",
+                    "Selfdistraction1", "Activecoping1", "Denial1", "Substanceuse1", "EmotionalSupport1", 
+                    "InstrumentalSupport1", "BehavioralDisengagement1", "Venting1", "PositiveReframing1", 
+                    "Planning1", "Humor1", "Acceptance1", "Religion1", "SelfBlame1", "Selfdistraction2", 
+                    "Activecoping2", "Denial2", "Substanceuse2", "EmotionalSupport2", "InstrumentalSupport2", 
+                    "BehavioralDisengagement2", "Venting2", "PositiveReframing2", "Planning2", "Humor2", 
+                    "Acceptance2", "Religion2", "SelfBlame2", "Selfdistraction3", "Activecoping3", "Denial3", 
+                    "Substanceuse3", "EmotionalSupport3", "InstrumentalSupport3", "BehavioralDisengagement3", 
+                    "Venting3", "PositiveReframing3", "Planning3", "Humor3", "Acceptance3", "Religion3", "SelfBlame3")
+
+# Select interested parameters
+clean_data <- data %>% 
+  dplyr::select(AGE, SEX, Residential_areas, Underlying_disease, MARRIED, CHILD, Household_income, Employment_status, Economically_impacted, PHQ1st)
+
+#Categorize PHQ1st
+clean_data <- clean_data %>%
+  mutate(Depression_Severity = case_when(
+    `PHQ1st` >= 0 & `PHQ1st` <= 4  ~ "Minimal or None",
+    `PHQ1st` >= 5 & `PHQ1st` <= 9  ~ "Mild",
+    `PHQ1st` >= 10 & `PHQ1st` <= 14 ~ "Moderate",
+    `PHQ1st` >= 15 & `PHQ1st` <= 19 ~ "Moderately Severe",
+    `PHQ1st` >= 20 & `PHQ1st` <= 27 ~ "Severe"
+  ))
+
+clean_data$Depression_Severity <- factor(clean_data$Depression_Severity, 
+                                         levels = c("Minimal or None", "Mild", 
+                                                    "Moderate", "Moderately Severe", "Severe"),
+                                         ordered = TRUE)
+
+# remove income 9999
+#clean_data <- clean_data %>% filter(Household_income != 9999)
+#data222 <- na.omit(data111)
+# check na in 2nd Phq
+#phq2nd_count <- sum(!is.na(data111$PHQ2nd))
+
+
+#Data Imputation
+#Tests if data are Missing Completely at Random.
+#check MCAR
+clean_data$Household_income[clean_data$Household_income == 9999] <- NA
+mcar_test(clean_data)
+
+#check MAR
+clean_data$Income_missing <- ifelse(is.na(clean_data$Household_income), 1, 0)
+
+# check if other variables have association with the missing values in income
+missing_model <- glm(Income_missing ~ AGE + Employment_status + SEX + Residential_areas + MARRIED + CHILD + Underlying_disease + Economically_impacted, 
+                     data = clean_data, 
+                     family = binomial)
+
+summary(missing_model)
+
+
+#multiple imputation using mice (pmm))
+imputed_data <- mice(clean_data, m = 3, method = "pmm", seed = 625, Print = FALSE)
+densityplot(imputed_data)
+aa_imputed <- complete(imputed_data, 2)
+
+##combine results from 5 imputation datasets, sightly different values but same results
+model <- with(imputed_data, polr(Depression_Severity ~ Household_income + AGE + Employment_status + SEX + 
+                                 Residential_areas + Underlying_disease + MARRIED + CHILD + Economically_impacted, Hess = TRUE))
+pooled_results <- pool(model)
+summary(pooled_results)
+```
+
+
+
+
+
+
+
+```{r} 
+
+#without-imputation data
+
+#Linear Regression
+model <- lm(PHQ1st ~ Household_income + AGE + SEX + Residential_areas + 
+                      Underlying_disease + MARRIED + CHILD + 
+                      Employment_status + Economically_impacted + I(Household_income*SEX) + I(Household_income*AGE) + I(Household_income*Employment_status), data = clean_data)
+
+summary(model)
+
+#ordinal regression using vglm
+model_vglm <- vglm(Depression_Severity ~ Household_income + AGE + SEX + Residential_areas + 
+                      Underlying_disease + MARRIED + CHILD + 
+                      Employment_status + Economically_impacted, 
+                   family = cumulative(link = "logitlink", parallel = TRUE), 
+                   data = clean_data)
+
+summary(model_vglm)
+
+##ordinal regression using polr (exact values, opposite signs)
+pmodel <- polr(Depression_Severity ~ Household_income + AGE + Employment_status + SEX + 
+                                 Residential_areas + Underlying_disease + MARRIED + CHILD + Economically_impacted,clean_data)
+summary(pmodel)
+```
+
+
+
+
+## machine learning
+
+```{r}
+library(randomForest)
+library(xgboost)
+library(e1071)
+library(pROC)
+library(caret)
+library(dplyr)
+set.seed(3)
+clean_data <- clean_data %>%
+  mutate(
+    Household_income = ifelse(is.na(Household_income), median(Household_income, na.rm = TRUE), Household_income)
+  )
+clean_data <- clean_data %>%
+  mutate(
+    SEX_numeric = as.numeric(as.character(SEX)),
+    Residential_areas_numeric = as.numeric(as.character(Residential_areas)),
+    MARRIED_numeric = as.numeric(as.character(MARRIED)),
+    CHILD_numeric = as.numeric(as.character(CHILD)),
+    Employment_status_numeric = as.numeric(as.character(Employment_status)),
+    Economically_impacted_numeric = as.numeric(as.character(Economically_impacted))
+  ) %>%
+  mutate(
+    Income_SEX = Household_income * SEX_numeric,
+    Income_AGE = Household_income * AGE,
+    Income_Employment = Household_income * Employment_status_numeric
+  )
+
+index <- createDataPartition(clean_data$Depression_Severity, p = 0.8, list = FALSE)
+train_data <- clean_data[index, ]
+test_data <- clean_data[-index, ]
+train_data$Depression_Severity <- as.factor(train_data$Depression_Severity)
+test_data$Depression_Severity <- as.factor(test_data$Depression_Severity)
+
+class_names <- c("Minimal or None", "Mild", "Moderate", "Moderately Severe", "Severe")
+levels(test_data$Depression_Severity) <- class_names
+levels(train_data$Depression_Severity) <- class_names
+
+calculate_metrics <- function(predictions, true_labels) {
+  mse <- mean((predictions - true_labels)^2)
+  rmse <- sqrt(mse)
+  return(list(MSE = mse, RMSE = rmse))
+}
+```
+
+## random forest classification of Depression_Severity
+
+```{r}
+rf_grid <- expand.grid(mtry = c(2, 3, 4, 5, 6))  
+
+rf_control <- trainControl(method = "cv", number = 5, verboseIter = TRUE)  # 5-fold cross-validation
+
+rf_tuned <- train(
+  Depression_Severity ~ Household_income + AGE + SEX_numeric + Residential_areas + 
+    Underlying_disease + MARRIED + CHILD + 
+    Employment_status_numeric + Economically_impacted + 
+    Income_SEX + Income_AGE + Income_Employment,
+  data = train_data,
+  method = "rf",
+  tuneGrid = rf_grid,
+  trControl = rf_control,
+  ntree = 1000  
+)
+
+print(rf_tuned$bestTune)
+
+rf_probabilities <- predict(rf_tuned, test_data, type = "prob")
+rf_predictions <- predict(rf_tuned, test_data)
+
+rf_metrics <- calculate_metrics(as.numeric(as.factor(rf_predictions)), as.numeric(as.factor(test_data$Depression_Severity)))
+
+# Variable importance plot
+varImpPlot(rf_tuned$finalModel, main = "Variable Importance - Tuned Random Forest")
+
+# ROC Curve Visualization
+levels_rf <- levels(test_data$Depression_Severity)
+for (class in levels_rf) {
+  binary_response <- ifelse(test_data$Depression_Severity == class, 1, 0)
+  roc_curve <- roc(binary_response, rf_probabilities[, class])
+  plot.roc(roc_curve, main = paste("ROC Curve for Tuned Random Forest:", class), col = "red", print.auc = TRUE)
+}
+```
+## gradient boosting classification of Depression_Severity
+```{r}
+train_matrix <- train_data %>%
+  dplyr::select(Household_income, AGE, SEX_numeric, Residential_areas_numeric, 
+                Underlying_disease, MARRIED_numeric, CHILD_numeric, 
+                Employment_status_numeric, Economically_impacted_numeric, 
+                Income_SEX, Income_AGE, Income_Employment) %>%
+  as.matrix()
+
+test_matrix <- test_data %>%
+  dplyr::select(Household_income, AGE, SEX_numeric, Residential_areas_numeric, 
+                Underlying_disease, MARRIED_numeric, CHILD_numeric, 
+                Employment_status_numeric, Economically_impacted_numeric, 
+                Income_SEX, Income_AGE, Income_Employment) %>%
+  as.matrix()
+
+train_labels <- as.numeric(as.factor(train_data$Depression_Severity)) - 1
+test_labels <- as.numeric(as.factor(test_data$Depression_Severity)) - 1
+
+train_dmatrix <- xgb.DMatrix(data = train_matrix, label = train_labels)
+test_dmatrix <- xgb.DMatrix(data = test_matrix, label = test_labels)
+
+xgb_grid <- expand.grid(
+  nrounds = c(50, 100, 150),          # Number of boosting rounds
+  max_depth = c(3, 5, 7),             # Maximum tree depth
+  eta = c(0.01, 0.1, 0.3),            # Learning rate
+  gamma = c(0, 1, 5),                 # Minimum loss reduction
+  colsample_bytree = c(0.5, 0.7, 1),  # Subsample ratio of columns
+  min_child_weight = c(1, 3, 5),      # Minimum sum of instance weight
+  subsample = c(0.7, 1)               # Subsample ratio of training instances
+)
+
+# Cross-validation control
+xgb_control <- trainControl(method = "cv", number = 5, verboseIter = TRUE)  # 5-fold CV
+
+# Train the xgboost model using grid search
+xgb_tuned <- train(
+  Depression_Severity ~ Household_income + AGE + SEX_numeric + Residential_areas + 
+    Underlying_disease + MARRIED + CHILD + 
+    Employment_status_numeric + Economically_impacted + 
+    Income_SEX + Income_AGE + Income_Employment,
+  data = train_data,
+  method = "xgbTree",
+  tuneGrid = xgb_grid,
+  trControl = xgb_control
+)
+
+print(xgb_tuned$bestTune)
+
+# Predict on test data using the tuned model
+xgb_pred_probs <- predict(xgb_tuned, test_data, type = "prob")
+xgb_predictions <- predict(xgb_tuned, test_data)
+
+# Visualize variable importance
+xgb.plot.importance(xgb.importance(model = xgb_tuned$finalModel), main = "Variable Importance - Extreme Gradient Boosting")
+
+# ROC Curve Visualization
+levels_xgb <- levels(test_data$Depression_Severity)
+for (class in levels_xgb) {
+  binary_response <- ifelse(test_data$Depression_Severity == class, 1, 0)
+  roc_curve <- roc(binary_response, xgb_pred_probs[, class])
+  plot.roc(roc_curve, main = paste("ROC Curve for Extreme Gradient Boosting:", class), col = "red", print.auc = TRUE)
+}
+```
+## support vector machine classification of Depression_Severity
+```{r}
+# Perform Grid Search to tune hyperparameters
+svm_tune <- tune(
+  svm,
+  Depression_Severity ~ Household_income + AGE + SEX_numeric + Residential_areas + 
+    Underlying_disease + MARRIED + CHILD + 
+    Employment_status_numeric + Economically_impacted + 
+    Income_SEX + Income_AGE + Income_Employment,
+  data = train_data,
+  kernel = "radial",    # RBF kernel
+  ranges = list(
+    cost = 2^(-5:5),    # Cost parameter
+    gamma = 2^(-5:5)    # Gamma for RBF kernel
+  )
+)
+
+print(svm_tune$best.parameters)
+
+# Train SVM with the best parameters
+svm_model <- svm(
+  Depression_Severity ~ Household_income + AGE + SEX_numeric + Residential_areas + 
+    Underlying_disease + MARRIED + CHILD + 
+    Employment_status_numeric + Economically_impacted + 
+    Income_SEX + Income_AGE + Income_Employment,
+  data = train_data,
+  probability = TRUE,
+  kernel = "radial",
+  cost = svm_tune$best.parameters$cost,
+  gamma = svm_tune$best.parameters$gamma
+)
+
+# Predict probabilities on the test data
+svm_pred_probs <- attr(predict(svm_model, test_data, probability = TRUE), "probabilities")
+
+colnames(svm_pred_probs) <- levels(test_data$Depression_Severity)
+
+# Predict the class labels on test data
+svm_predictions <- predict(svm_model, test_data)
+
+# Calculate metrics
+svm_metrics <- calculate_metrics(
+  as.numeric(as.factor(svm_predictions)),
+  as.numeric(as.factor(test_data$Depression_Severity))
+)
+
+# Plot ROC curves for each class
+for (class in levels(test_data$Depression_Severity)) {
+  binary_response <- ifelse(test_data$Depression_Severity == class, 1, 0)
+  roc_curve <- roc(binary_response, svm_pred_probs[, class])
+  
+  # Plot ROC curve for this class
+  plot.roc(roc_curve, 
+           main = paste("ROC Curve for SVM:", class), 
+           col = "red", 
+           print.auc = TRUE)
+}
+```
+
+## comparision
+```{r}
+xgb_actual <- as.numeric(as.factor(test_data$Depression_Severity)) - 1
+xgb_predicted <- as.numeric(as.factor(xgb_predictions)) - 1
+xgb_mse <- mean((xgb_actual - xgb_predicted)^2)
+xgb_rmse <- sqrt(xgb_mse)
+xgb_metrics <- list(MSE = xgb_mse, RMSE = xgb_rmse)
+
+cat("\nModel Metrics:\n")
+cat("Random Forest: MSE =", rf_metrics$MSE, ", RMSE =", rf_metrics$RMSE, "\n")
+cat("Gradient Boosting: MSE =", xgb_metrics$MSE, ", RMSE =", xgb_metrics$RMSE, "\n")
+cat("Support Vector Machine: MSE =", svm_metrics$MSE, ", RMSE =", svm_metrics$RMSE, "\n")
+```
+
